@@ -62,7 +62,7 @@ impl PathId {
         Self(inner)
     }
 
-    /// Saturating integer substraction. Computes self - rhs, saturating at the numeric bounds
+    /// Saturating integer subtraction. Computes self - rhs, saturating at the numeric bounds
     /// instead of overflowing.
     pub fn saturating_sub(self, rhs: impl Into<Self>) -> Self {
         let rhs = rhs.into();
@@ -356,21 +356,25 @@ impl PathData {
     /// Increment the total size of sent UDP datagrams
     pub(super) fn inc_total_sent(&mut self, inc: u64) {
         self.total_sent = self.total_sent.saturating_add(inc);
-        trace!(
-            remote = %self.remote,
-            anti_amplification_budget = %(self.total_recvd * 3).saturating_sub(self.total_sent),
-            "anti amplification budget decreased"
-        );
+        if !self.validated {
+            trace!(
+                remote = %self.remote,
+                anti_amplification_budget = %(self.total_recvd * 3).saturating_sub(self.total_sent),
+                "anti amplification budget decreased"
+            );
+        }
     }
 
     /// Increment the total size of received UDP datagrams
     pub(super) fn inc_total_recvd(&mut self, inc: u64) {
         self.total_recvd = self.total_recvd.saturating_add(inc);
-        trace!(
-            remote = %self.remote,
-            anti_amplification_budget = %(self.total_recvd * 3).saturating_sub(self.total_sent),
-            "anti amplification budget increased"
-        );
+        if !self.validated {
+            trace!(
+                remote = %self.remote,
+                anti_amplification_budget = %(self.total_recvd * 3).saturating_sub(self.total_sent),
+                "anti amplification budget increased"
+            );
+        }
     }
 
     #[cfg(feature = "qlog")]
@@ -798,7 +802,7 @@ pub enum PathEvent {
     /// The remote changed the status of the path
     ///
     /// The local status is not changed because of this event. It is up to the application
-    /// to update the local status, wihch is used for packet scheduling, when the remote
+    /// to update the local status, which is used for packet scheduling, when the remote
     /// changes the status.
     RemoteStatus {
         /// Path which has changed status
@@ -814,6 +818,17 @@ pub enum PathEvent {
         /// The address observed by the remote over this path
         addr: SocketAddr,
     },
+}
+
+/// Error from setting path status
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum SetPathStatusError {
+    /// Error indicating that a path has not been opened or has already been abandoned
+    #[error("closed path")]
+    ClosedPath,
+    /// Error indicating that this operation requires multipath to be negotiated whereas it hasn't been
+    #[error("multipath not negotiated")]
+    MultipathNotNegotiated,
 }
 
 /// Error indicating that a path has not been opened or has already been abandoned
