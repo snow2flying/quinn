@@ -892,26 +892,6 @@ impl Connection {
         max_datagrams: usize,
         buf: &mut Vec<u8>,
     ) -> Option<Transmit> {
-        if let Some(probing) = self
-            .iroh_hp
-            .server_side_mut()
-            .ok()
-            .and_then(iroh_hp::ServerState::next_probe)
-        {
-            let destination = probing.remote();
-            trace!(%destination, "RAND_DATA packet");
-            let token: u64 = self.rng.random();
-            buf.put_u64(token);
-            probing.finish(token);
-            return Some(Transmit {
-                destination,
-                ecn: None,
-                size: 8,
-                segment_size: None,
-                src_ip: None,
-            });
-        }
-
         assert!(max_datagrams != 0);
         let max_datagrams = match self.config.enable_segmentation_offload {
             false => 1,
@@ -1116,6 +1096,47 @@ impl Connection {
                 // not be built.
                 if transmit.num_datagrams() > 0 {
                     break;
+                }
+
+                if transmit.is_empty() {
+                    // Nothing to send on this path, and nothing yet built; try to send hole punching
+                    // path challenges.
+                    if let Some(probing) = self
+                        .iroh_hp
+                        .server_side_mut()
+                        .ok()
+                        .and_then(iroh_hp::ServerState::next_probe)
+                    {
+                        if let Some(new_cid) = self
+                            .rem_cids
+                            .get_mut(&path_id)
+                            .and_then(CidQueue::next_reserved)
+                        {
+                            let destination = probing.remote();
+                            let token: u64 = self.rng.random();
+                            trace!(%destination, cid=%new_cid, token=format!("{:08x}", token), "Nat traversal: PATH_CHALLENGE packet");
+                            // TODO(@divma): abstract writting path challenges, this logic should
+                            // no be here
+
+                            buf.write(frame::FrameType::PATH_CHALLENGE);
+                            buf.write(token);
+                            // TODO(@divma): can I just create a new qlog?
+                            // qlog.frame(&Frame::PathChallenge(token));
+                            // TODO(@divma): separate stat?
+                            self.stats.frame_tx.path_challenge += 1;
+
+                            // Remember the token sent to this remote
+                            probing.finish(token);
+                            // TODO(@divma): figure out padding if any
+                            return Some(Transmit {
+                                destination,
+                                ecn: None,
+                                size: 8,
+                                segment_size: None,
+                                src_ip: None,
+                            });
+                        }
+                    }
                 }
 
                 match self.paths.keys().find(|&&next| next > path_id) {
@@ -4261,6 +4282,9 @@ impl Connection {
                                 self.ping_path(path_id).ok();
                             }
                         }
+                    } else if self.iroh_hp.client_side().is_ok() {
+                        // TODO(@divma): temp log. This might be too much
+                        debug!("Potential Nat traversal PATH_CHALLENGE received");
                     }
                 }
                 Frame::PathResponse(token) => {
