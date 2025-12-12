@@ -6,7 +6,7 @@ use crate::{ConnectionId, ResetToken, frame::NewConnectionId};
 #[derive(Debug, Clone, Copy)]
 struct CidData(ConnectionId, Option<ResetToken>);
 
-/// Sliding window of active Connection IDs
+/// Sliding window of active Connection IDs.
 ///
 /// This represents a circular buffer that can contain gaps due to packet loss or reordering.
 /// The buffer has three regions:
@@ -14,9 +14,12 @@ struct CidData(ConnectionId, Option<ResetToken>);
 /// - Zero to `Self::LEN - 1` reserved CIDs from `self.cursor` up to `self.cursor_reserved`.
 /// - More "available"/"ready" CIDs after `self.cursor_reserved`.
 ///
-/// You grow the range of reserved CIDs by calling [`CidQueue::next_reserved`], which takes one
-/// of the available ones and returns the CID that was reserved.
-/// You add available/ready CIDs by calling [`CidQueue::insert`].
+/// The range of reserved CIDs is grown by calling [`CidQueue::next_reserved`], which takes one of
+/// the available ones and returns the CID that was reserved.
+///
+/// New available/ready CIDs are added by calling [`CidQueue::insert`].
+///
+/// May contain gaps due to packet loss or reordering.
 #[derive(Debug)]
 pub(crate) struct CidQueue {
     /// Ring buffer indexed by `self.cursor`
@@ -27,8 +30,11 @@ pub(crate) struct CidQueue {
     ///
     /// The sequence number of the active CID; must be the smallest among CIDs in `buffer`.
     offset: u64,
-    /// Circular index for the last reserved CID, i.e. a CID that is
-    /// not active, but was used for probing packets on a different remote address.
+    /// Circular index for the last reserved CID, i.e. a CID that is not the active CID, but was
+    /// used for probing packets on a different remote address.
+    ///
+    /// When [`Self::cursor_reserved`] and [`Self::cursor`] are equal, no CID is considered
+    /// reserved.
     cursor_reserved: usize,
 }
 
@@ -103,14 +109,15 @@ impl CidQueue {
     /// 1) the corresponding ResetToken and 2) a non-empty range preceding it to retire
     pub(crate) fn next(&mut self) -> Option<(ResetToken, Range<u64>)> {
         let (i, cid_data) = self.iter_from_reserved().nth(1)?;
-        for i in 0..=self.reserved_len() {
-            self.buffer[self.cursor + i] = None;
+        let reserved = self.reserved_len();
+        for j in 0..=reserved {
+            self.buffer[self.cursor + j] = None;
         }
-
         let orig_offset = self.offset;
-        self.offset += i as u64;
-        self.cursor = (self.cursor + i) % Self::LEN;
+        self.offset += (i + reserved) as u64;
+        self.cursor = (self.cursor_reserved + i) % Self::LEN;
         self.cursor_reserved = self.cursor;
+
         Some((cid_data.1.unwrap(), orig_offset..self.offset))
     }
 
@@ -133,7 +140,9 @@ impl CidQueue {
         })
     }
 
-    /// Iterate CIDs in CidQueue that are not `None`, including the active CID
+    /// Iterate CIDs in CidQueue that are not `None`, including the active CID.
+    ///
+    /// Along with the CID, it returns the offset counted from [`Self::cursor_reserved`] where the CID is stored.
     fn iter_from_reserved(&self) -> impl Iterator<Item = (usize, CidData)> + '_ {
         (0..(Self::LEN - self.reserved_len())).filter_map(move |step| {
             let index = (self.cursor_reserved + step) % Self::LEN;
@@ -185,7 +194,7 @@ mod tests {
         NewConnectionId {
             path_id: None,
             sequence,
-            id: ConnectionId::new(&[0xAB; 8]),
+            id: ConnectionId::new(&sequence.to_be_bytes()),
             reset_token: ResetToken::from([0xCD; crate::RESET_TOKEN_SIZE]),
             retire_prior_to,
         }
@@ -407,7 +416,7 @@ mod tests {
             assert!(q.next_reserved().is_some());
         }
 
-        q.next();
+        assert!(q.next().is_some());
         assert_eq!(q.next(), None);
     }
 
@@ -437,5 +446,39 @@ mod tests {
         }
 
         assert_eq!(q.next(), None);
+    }
+
+    #[test]
+    fn insert_reserve_advance() {
+        let mut q = CidQueue::new(initial_cid());
+
+        let first = cid(1, 0);
+        let second = cid(2, 0);
+        let third = cid(3, 0);
+
+        q.insert(first).unwrap();
+        q.insert(second).unwrap();
+
+        assert_eq!(q.next_reserved(), Some(first.id));
+        q.insert(third).unwrap();
+        q.next();
+        assert_eq!(q.active(), second.id);
+    }
+
+    #[test]
+    fn sparse_insert_reserve_insert_advance() {
+        let mut q = CidQueue::new(initial_cid());
+
+        let one = cid(1, 0);
+        let two = cid(2, 0);
+        let three = cid(3, 0);
+
+        q.insert(two).unwrap();
+        q.insert(three).unwrap();
+        assert_eq!(q.next_reserved(), Some(two.id));
+        q.insert(one).unwrap();
+        q.next();
+        assert_eq!(q.active(), three.id);
+        assert_eq!(q.next_reserved(), None);
     }
 }
