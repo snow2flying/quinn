@@ -1115,7 +1115,7 @@ impl Connection {
                             let destination = probing.remote();
                             let token: u64 = self.rng.random();
                             trace!(%destination, cid=%new_cid, token=format!("{:08x}", token), "Nat traversal: PATH_CHALLENGE packet");
-                            // TODO(@divma): abstract writting path challenges, this logic should
+                            // TODO(@divma): abstract writing path challenges, this logic should
                             // no be here
 
                             buf.write(frame::FrameType::PATH_CHALLENGE);
