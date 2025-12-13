@@ -369,6 +369,7 @@ impl QlogSink {
 }
 
 /// A [`QlogSink`] with a `now` timestamp.
+#[derive(Clone)]
 pub(super) struct QlogSinkWithTime<'a> {
     #[cfg(feature = "qlog")]
     sink: &'a QlogSink,
