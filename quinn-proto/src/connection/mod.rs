@@ -1114,20 +1114,14 @@ impl Connection {
                         {
                             let destination = probing.remote();
                             let token: u64 = self.rng.random();
-                            trace!(%destination, cid=%new_cid, token=format!("{:08x}", token), "Nat traversal: PATH_CHALLENGE packet");
-                            // TODO(@divma): abstract writing path challenges, this logic should
-                            // no be here
-
-                            buf.write(frame::FrameType::PATH_CHALLENGE);
-                            buf.write(token);
-                            // TODO(@divma): can I just create a new qlog?
-                            // qlog.frame(&Frame::PathChallenge(token));
-                            // TODO(@divma): separate stat?
+                            let challenge = frame::PathChallenge(token);
+                            trace!(%destination, cid=%new_cid, %challenge, "Nat traversal: PATH_CHALLENGE packet");
+                            buf.write(challenge);
+                            QlogSentPacket::default().frame(&Frame::PathChallenge(challenge));
                             self.stats.frame_tx.path_challenge += 1;
 
                             // Remember the token sent to this remote
                             probing.finish(token);
-                            // TODO(@divma): figure out padding if any
                             return Some(Transmit {
                                 destination,
                                 ecn: None,
