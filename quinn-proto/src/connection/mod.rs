@@ -1120,6 +1120,7 @@ impl Connection {
                             QlogSentPacket::default().frame(&Frame::PathChallenge(challenge));
                             self.stats.frame_tx.path_challenge += 1;
 
+                            // TODO(@divma): padding
                             // Remember the token sent to this remote
                             probing.finish(token);
                             return Some(Transmit {
@@ -1334,15 +1335,29 @@ impl Connection {
 
             // Send an off-path PATH_RESPONSE. Prioritized over on-path data to ensure that
             // path validation can occur while the link is saturated.
-            if space_id == SpaceId::Data && builder.buf.num_datagrams() == 1 {
+            if space_id == SpaceId::Data && builder.buf.is_empty() {
                 let path = self.path_data_mut(path_id);
                 if let Some((token, remote)) = path.path_responses.pop_off_path(path.remote) {
-                    // TODO(@divma): Here we would need to create a new builder to set a different
-                    // CID. Why do we check `num_datagrams` being 1??
-
-                    // TODO(flub): We need to use the right CID!  We shouldn't use the same
-                    //    CID as the current active one for the path.  Though see also
-                    //    https://github.com/quinn-rs/quinn/issues/2184
+                    let mut builder = if let Some(fresh_cid) = self
+                        .rem_cids
+                        .get_mut(&path_id)
+                        .and_then(CidQueue::next_reserved)
+                    {
+                        PacketBuilder::new(
+                            now,
+                            space_id,
+                            path_id,
+                            fresh_cid,
+                            &mut transmit,
+                            can_send.other,
+                            self,
+                            &mut qlog,
+                        )?
+                    } else {
+                        // TODO(@divma): keep the old logic. We would need to push the challenge
+                        // back, but we have lost the packet number.
+                        builder
+                    };
                     let response = frame::PathResponse(token);
                     trace!(%response, "(off-path)");
                     builder.frame_space_mut().write(response);
