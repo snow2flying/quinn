@@ -4325,19 +4325,44 @@ impl Connection {
                         .get_mut(&path_id)
                         .expect("payload is processed only after the path becomes known");
 
-                    use paths::OnPathResponseReceived::*;
-                    match path.data.on_path_response_received(now, response.0, remote) {
-                        OnPath { was_open } => {
-                            use PathTimer::*;
-                            let qlog = self.qlog.with_time(now);
+                    match path.data.challenges_sent.get(&response.0) {
+                        // Response to an on-path PathChallenge
+                        Some(info) if info.remote == remote && path.data.remote == remote => {
+                            let sent_instant = info.sent_instant;
+                            // TODO(@divma): reset timers using the remaining off-path challenges
+                            self.timers.stop(
+                                Timer::PerPath(path_id, PathTimer::PathValidation),
+                                self.qlog.with_time(now),
+                            );
+                            self.timers.stop(
+                                Timer::PerPath(path_id, PathTimer::PathChallengeLost),
+                                self.qlog.with_time(now),
+                            );
+                            if !path.data.validated {
+                                trace!("new path validated");
+                            }
+                            self.timers.stop(
+                                Timer::PerPath(path_id, PathTimer::PathOpen),
+                                self.qlog.with_time(now),
+                            );
+                            // Clear any other on-path sent challenge.
+                            path.data
+                                .challenges_sent
+                                .retain(|_token, info| info.remote != remote);
+                            path.data.send_new_challenge = false;
+                            path.data.validated = true;
 
-                            self.timers
-                                .stop(Timer::PerPath(path_id, PathValidation), qlog.clone());
-                            self.timers
-                                .stop(Timer::PerPath(path_id, PathOpen), qlog.clone());
-                            if !was_open {
-                                self.events
-                                    .push_back(Event::Path(PathEvent::Opened { id: path_id }));
+                            // This RTT can only be used for the initial RTT, not as a normal
+                            // sample: https://www.rfc-editor.org/rfc/rfc9002#section-6.2.2-2.
+                            let rtt = now.saturating_duration_since(sent_instant);
+                            path.data.rtt.reset_initial_rtt(rtt);
+
+                            self.events
+                                .push_back(Event::Path(PathEvent::Opened { id: path_id }));
+                            // mark the path as open from the application perspective now that Opened
+                            // event has been queued
+                            if !std::mem::replace(&mut path.data.open, true) {
+                                trace!("path opened");
                                 if let Some(observed) = path.data.last_observed_addr_report.as_ref()
                                 {
                                     self.events.push_back(Event::Path(PathEvent::ObservedAddr {
@@ -4350,44 +4375,20 @@ impl Connection {
                                 prev.challenges_sent.clear();
                                 prev.send_new_challenge = false;
                             }
-
-                            match path.data.earliest_expiring_challenge() {
-                                Some(new_expire_time) => {
-                                    let expires = new_expire_time
-                                        + self.ack_frequency.max_ack_delay_for_pto();
-                                    self.timers.set(
-                                        Timer::PerPath(path_id, PathChallengeLost),
-                                        expires,
-                                        qlog,
-                                    )
-                                }
-                                None => self
-                                    .timers
-                                    .stop(Timer::PerPath(path_id, PathChallengeLost), qlog),
-                            }
                         }
-                        OffPath => {
+                        // Response to an off-path PathChallenge
+                        Some(info) if info.remote == remote => {
                             debug!("Response to off-path PathChallenge!");
-                            match path.data.earliest_expiring_challenge() {
-                                Some(new_expire_time) => {
-                                    let expires = new_expire_time
-                                        + self.ack_frequency.max_ack_delay_for_pto();
-                                    self.timers.set(
-                                        Timer::PerPath(path_id, PathTimer::PathChallengeLost),
-                                        expires,
-                                        self.qlog.with_time(now),
-                                    )
-                                }
-                                None => self.timers.stop(
-                                    Timer::PerPath(path_id, PathTimer::PathChallengeLost),
-                                    self.qlog.with_time(now),
-                                ),
-                            }
+                            path.data
+                                .challenges_sent
+                                .retain(|_token, info| info.remote != remote);
                         }
-                        Unknown => debug!(%response, "ignoring invalid PATH_RESPONSE"),
-                        Invalid { expected } => {
-                            debug!(%response, from=%remote, %expected, "ignoring invalid PATH_RESPONSE")
+                        // Response to a PathChallenge we recognize, but from an invalid remote
+                        Some(info) => {
+                            debug!(%response, from=%remote, expected=%info.remote, "ignoring invalid PATH_RESPONSE")
                         }
+                        // Response to an unknown PathChallenge
+                        None => debug!(%response, "ignoring invalid PATH_RESPONSE"),
                     }
                 }
                 Frame::MaxData(bytes) => {
